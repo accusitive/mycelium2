@@ -1,0 +1,8 @@
+[package]
+edition = "2021"
+name = "mycelium2"
+version = "0.1.0"
+[dependencies]
+byteorder = "1.4.3"
+hexdump = "*"
+minecraft-varint = "0.2.0"
