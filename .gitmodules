@@ -1,0 +1,3 @@
+[submodule "Burger"]
+	path = Burger
+	url = https://github.com/Pokechu22/Burger
