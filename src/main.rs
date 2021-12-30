@@ -146,7 +146,7 @@ fn handle_client(bclient: TcpStream) {
                 // Tab complete
                 if id == 0x01 {
                     let text = copy_of_packet.read_string().unwrap();
-                    if text.starts_with("/join") {
+                    if text.starts_with("/join ") {
                         let mut buf = vec![];
                         buf.write_var_u32(0x0E).unwrap();
                         buf.write_var_u32(SERVERS.len() as u32).unwrap();
@@ -277,103 +277,9 @@ impl<X: Write> MyceliumWrite for X {
     }
 }
 
-pub(crate) mod map;
-
-struct Packet {
-    id: u32,
-    len: u32,
-    data: Vec<u8>,
-}
-
-#[test]
-fn z() {
-    let mut v = vec![0; 3];
-    WriteBytesExt::write_i32::<BigEndian>(&mut v, 2).unwrap();
-    WriteBytesExt::write_i32::<BigEndian>(&mut v, 2).unwrap();
-    WriteBytesExt::write_i32::<BigEndian>(&mut v, 2).unwrap();
-    WriteBytesExt::write_i32::<BigEndian>(&mut v, 2).unwrap();
-    WriteBytesExt::write_i32::<BigEndian>(&mut v, 2).unwrap();
-    WriteBytesExt::write_i32::<BigEndian>(&mut v, 2).unwrap();
-    assert!(&v.len() > &3);
-}
-impl Packet {
-    pub(crate) fn transform_to_112(&mut self) -> Vec<u8> {
-        let mut v = vec![];
-        let pid = match self.id {
-            _ => self.id,
-        };
-        let buf = self.data.clone();
-        v.write_var_u32(self.len as u32).unwrap();
-        v.write_var_u32(pid).unwrap();
-        v.write_all(&buf).unwrap();
-        dbg!(&v);
-        v
-    }
-}
-
-// struct Proxy {
-//     listener: TcpListener,
-// }
-// struct Connection {
-//     /// Upstream is Connecting client
-//     upstream: TcpStream,
-//     /// Downstream is base server
-//     downstream: TcpStream,
-// }
-
-// fn main() {
-//     let proxy = Proxy {
-//         listener: TcpListener::bind("localhost:5005").unwrap(),
-//     };
-//     for incoming_connection in proxy.listener.incoming() {
-//         std::thread::spawn(|| {
-//             let downstream = incoming_connection.unwrap();
-//             let upstream = TcpStream::connect("localhost:25565").unwrap();
-//             let connection = Connection {
-//                 upstream: upstream.try_clone().unwrap(),
-//                 downstream: downstream.try_clone().unwrap(),
-//             };
-
-//             let (dss, dsr) = mpsc::channel::<TcpStream>();
-//             // let (uss, usr) = mpsc::channel::<&[u8]>();
-
-//             // std::thread::spawn(move || {
-//             //     uss.send(&[]).unwrap();
-//             // });
-//         });
-//     }
-// }
-
-// // #[tokio::main]
-// // async fn main() {
-// //     let listener = TcpListener::bind("127.0.0.1:5005").await.unwrap();
-// //     loop {
-// //         match listener.accept().await {
-// //             Ok((mut client, addr)) => {
-// //                 // handle
-// //                 println!("New client.");
-// //                 let mut server = TcpStream::connect("127.0.0.1:25565").await.unwrap();
-// //                 // tokio::spawn(server.read(&mut []));
-// //                 // tokio::spawn(async move {
-// //                 //     let i = client.read_i16_le().await.unwrap();
-// //                 // });
-// //                 // tokio::spawn(async move {
-// //                 //     // let i = client.read_i16_le().await.unwrap();
-// //                 //     client.write(&[]);
-// //                 // });
-// //             }
-// //             Err(_) => todo!(),
-// //         }
-// //     }
-// // }
 #[test]
 fn test_login() {
     let mut server = TcpStream::connect("127.0.0.1:35565").unwrap();
-    // x.send(server.try_clone().unwrap()).unwrap();
-    // *server = &mut TcpStream::connect("127.0.0.1:25565").unwrap();
-    // local_server.
-    // local_server = TcpStream::connect("127.0.0.1:25565").unwrap();
-
     // handshake
     {
         let mut v: Vec<u8> = vec![];
