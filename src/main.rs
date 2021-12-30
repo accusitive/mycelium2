@@ -1,175 +1,96 @@
-use std::cell::{Cell, RefCell};
+use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
+use minecraft_varint::{VarIntRead, VarIntWrite};
 use std::collections::HashMap;
 use std::io::{Cursor, Write};
 use std::net::TcpStream;
-use std::ops::{Shr, ShrAssign};
-use std::pin::Pin;
-use std::sync::mpsc::TryRecvError;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::mpsc::{TryRecvError, Receiver, Sender};
 use std::{io::Read, net::TcpListener};
 
-use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
-use colored::Colorize;
-use minecraft_varint::{VarIntRead, VarIntWrite};
 lazy_static::lazy_static! {
     static ref SERVERS: HashMap<&'static str, &'static str> = {
         let mut m =  HashMap::new();
         m.insert("lobby", "127.0.0.1:25565");
         m.insert("flat", "127.0.0.1:35565");
-
+        m.insert("a", "127.0.0.1:8001");
+        m.insert("b", "127.0.0.1:8002");
 
         m
     };
 }
+const DEFAULT_SERVER_NAME: &str = "lobby";
 fn main() {
     let s = Server {
         listener: TcpListener::bind("0.0.0.0:5005").unwrap(),
         motd: "1".to_string(),
     };
     for client in s.listener.incoming() {
-        let mut client = client.unwrap();
+        let client = client.unwrap();
 
         std::thread::spawn(move || handle_client(client));
     }
-    // let stream = TcpStream::connect("test.geysermc.org:25565").unwrap();
-
-    // let mut data = vec![];
-    // data.write_var_i32(0);
 }
 fn handle_client(bclient: TcpStream) {
-    let bserver = TcpStream::connect("localhost:25565").unwrap();
+    let bserver = TcpStream::connect(SERVERS.get(DEFAULT_SERVER_NAME).unwrap()).unwrap();
     // Server reading thread
-    // let mut arcclient = bclient.try_clone().unwrap();
-    // let mut arcserver = bserver.try_clone().unwrap();
 
     // Incoming
     let mut client = bclient.try_clone().unwrap();
     let mut server = bserver.try_clone().unwrap();
     // *client.unwrap() = TcpStream::connect("").unwrap();
     let (x, y) = std::sync::mpsc::channel::<TcpStream>();
-    std::thread::spawn(move || {
-        let mut post = false;
-        loop {
-            // dbg!(&y.try_recv());
-            match y.try_recv() {
-                Ok(new_server) => {
-                    dbg!(&new_server);
 
-                    server = new_server;
-                    post = true;
-                }
-                Err(TryRecvError::Empty) => {
-                    // This will be Err(Empty)
-                }
-                Err(e) => panic!("Sender error; {}", e),
-            }
-
-            let len = match { server.read_var_u32() } {
-                Ok(l) => l,
-                Err(_) => continue,
-            };
-
-            let mut buf = vec![0; len as usize];
-            server.read_exact(&mut buf).unwrap();
-            {
-                let mut b = Cursor::new(buf.clone());
-
-                let id = b.read_var_u32().unwrap();
-                // Printing takes too long when printing chunk data. Its useless to the human eye anyway.
-                if id == 0x23 {
-                    client.write_var_u32(len).unwrap();
-                    client.write_all(&buf).unwrap();
-                    if post {
-                        let _eid = b.read_i32::<BigEndian>().unwrap();
-                        let _gamemode = b.read_u8().unwrap();
-                        let dimension = b.read_i32::<BigEndian>().unwrap();
-
-                        let mut send_respawn = |dimension| {
-                            let difficulty = 1;
-                            let gamemode = 1;
-                            let level_type = "flat";
-
-                            let mut v = vec![];
-                            v.write_var_u32(0x35).unwrap();
-                            v.write_i32::<BigEndian>(dimension).unwrap();
-                            v.write_i8(difficulty).unwrap();
-                            v.write_i8(gamemode).unwrap();
-                            v.write_string(level_type.to_string());
-
-                            client.write_var_u32(v.len() as u32).unwrap();
-                            client.write_all(&v).unwrap();
-                        };
-                        let fake_dimension = match dimension {
-                            -1 => 1,
-                            0 => -1,
-                            1 => 0,
-                            _ => panic!(),
-                        };
-                        send_respawn(fake_dimension);
-                        send_respawn(dimension);
-                        post = false;
-                    }
-                }
-
-                match id {
-                    0x23 => {}
-                    _ => {
-                        client.write_var_u32(len).unwrap();
-                        client.write_all(&buf).unwrap();
-                    }
-                }
-            }
-        }
-    });
+    std::thread::spawn(move || handle_upstream(y, server ,client));
 
     // Client reading thread
     let mut client = bclient.try_clone().unwrap();
     let mut server = bserver.try_clone().unwrap();
     // Outgoing
-    std::thread::spawn(move || {
-        let mut current_server = server;
-        println!("New client connected.");
+    std::thread::spawn(move || handle_downstream(x, server, client));
+    // loop {}
+}
+fn handle_downstream(x: Sender<TcpStream>, mut server: TcpStream, mut client: TcpStream) {
+    let mut current_server = server;
+    let mut current_server_name = DEFAULT_SERVER_NAME.to_string();
+    println!("New client connected.");
 
-        loop {
-            let len = match { client.read_var_u32() } {
-                Ok(l) => l,
-                Err(_) => continue,
-            };
+    loop {
+        let len = match { client.read_var_u32() } {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
 
-            let mut buf = vec![0; len as usize];
-            client.read_exact(&mut buf).unwrap();
-            {
-                // Copy of packet data to inspect without modifying the original buffer
-                let mut copy_of_packet = Cursor::new(buf.clone());
-                let id = copy_of_packet.read_var_u32().unwrap();
-                // Tab complete
-                if id == 0x01 {
-                    let text = copy_of_packet.read_string().unwrap();
-                    if text.starts_with("/join ") {
-                        let mut buf = vec![];
-                        buf.write_var_u32(0x0E).unwrap();
-                        buf.write_var_u32(SERVERS.len() as u32).unwrap();
-                        for server in SERVERS.iter() {
-                            buf.write_string(server.0.to_string());
-
-                        }
-                        client.write_var_u32(buf.len() as u32).unwrap();
-                        client.write_all(&buf).unwrap();
-                       
+        let mut buf = vec![0; len as usize];
+        client.read_exact(&mut buf).unwrap();
+        {
+            // Copy of packet data to inspect without modifying the original buffer
+            let mut copy_of_packet = Cursor::new(buf.clone());
+            let id = copy_of_packet.read_var_u32().unwrap();
+            // Tab complete
+            if id == 0x01 {
+                let text = copy_of_packet.read_string().unwrap();
+                if text.starts_with("/join ") {
+                    let mut buf = vec![];
+                    buf.write_var_u32(0x0E).unwrap();
+                    buf.write_var_u32(SERVERS.len() as u32).unwrap();
+                    for server in SERVERS.iter() {
+                        buf.write_string(server.0.to_string());
                     }
-                    continue
+                    client.write_var_u32(buf.len() as u32).unwrap();
+                    client.write_all(&buf).unwrap();
                 }
-                // Send message
-                if id == 0x02 {
-                    let msg = copy_of_packet.read_string().unwrap();
-                    if msg.starts_with("/join ") {
-                        let args = msg.split_ascii_whitespace().collect::<Vec<_>>();
+                continue;
+            }
+            // Send message
+            if id == 0x02 {
+                let msg = copy_of_packet.read_string().unwrap();
+                if msg.starts_with("/join ") {
+                    let args = msg.split_ascii_whitespace().collect::<Vec<_>>();
 
-                        let address = SERVERS.get(args[1]);
-                        if let Some(address) = address {
+                    let address = SERVERS.get(args[1]);
+                    if let Some(address) = address {
+                        if args[1] != current_server_name {
                             let mut new_server = TcpStream::connect(address).unwrap();
-
+                            current_server_name = args[1].to_string();
                             {
                                 let mut v: Vec<u8> = vec![];
                                 let pv = 340;
@@ -216,7 +137,9 @@ fn handle_client(bclient: TcpStream) {
                                     2 => {
                                         let uuid = new_server.read_string().unwrap();
                                         let username = new_server.read_string().unwrap();
-                                        current_server.shutdown(std::net::Shutdown::Both).unwrap();
+                                        current_server
+                                            .shutdown(std::net::Shutdown::Both)
+                                            .unwrap();
 
                                         dbg!(uuid, username);
 
@@ -234,26 +157,104 @@ fn handle_client(bclient: TcpStream) {
                         }
                     }
                 }
-                // For intercepting normal sending.
+            }
+            // For intercepting normal sending.
+            match id {
+                _ => {
+                    current_server.write_var_u32(len).unwrap();
+                    current_server.write_all(&buf).unwrap();
+                    // dbg!(id);
+                    // println!("-> ID: 0x{:X} {}", id, id);
+                }
+            }
+        }
+    }
+}
+fn handle_upstream(y: Receiver<TcpStream>, mut server: TcpStream, mut client: TcpStream) {
+    {
+        let mut recently_transferred = false;
+        loop {
+            match y.try_recv() {
+                Ok(new_server) => {
+                    dbg!(&new_server);
+
+                    server = new_server;
+                    recently_transferred = true;
+                }
+                // Not really an error
+                Err(TryRecvError::Empty) => {}
+                Err(e) => panic!("Sender error; {}", e),
+            }
+
+            let len = match { server.read_var_u32() } {
+                Ok(l) => l,
+                Err(_) => continue,
+            };
+
+            let mut buf = vec![0; len as usize];
+            server.read_exact(&mut buf).unwrap();
+            {
+                let mut b = Cursor::new(buf.clone());
+
+                let id = b.read_var_u32().unwrap();
+                // Printing takes too long when printing chunk data. Its useless to the human eye anyway.
+                if id == 0x23 {
+                    client.write_var_u32(len).unwrap();
+                    client.write_all(&buf).unwrap();
+                    if recently_transferred {
+                        let _eid = b.read_i32::<BigEndian>().unwrap();
+                        let gamemode = b.read_u8().unwrap();
+                        let dimension = b.read_i32::<BigEndian>().unwrap();
+                        let difficulty = b.read_u8().unwrap();
+                        let _maxplayers = b.read_u8().unwrap();
+                        let level_type = b.read_string().unwrap_or("default".to_string());
+                        let mut send_respawn = |dimension| {
+                            // let difficulty = 1;
+                            // let gamemode = 1;
+                            // let level_type = "flat";
+
+                            let mut v = vec![];
+                            v.write_var_u32(0x35).unwrap();
+                            v.write_i32::<BigEndian>(dimension).unwrap();
+                            v.write_u8(difficulty).unwrap();
+                            v.write_u8(gamemode).unwrap();
+                            v.write_string(level_type.to_string());
+
+                            client.write_var_u32(v.len() as u32).unwrap();
+                            client.write_all(&v).unwrap();
+                        };
+                        let fake_dimension = match dimension {
+                            -1 => 1,
+                            0 => -1,
+                            1 => 0,
+                            _ => panic!(),
+                        };
+                        send_respawn(fake_dimension);
+                        send_respawn(dimension);
+                        recently_transferred = false;
+                    }
+                }
+
                 match id {
+                    // Join game
+                    0x23 => {}
                     _ => {
-                        current_server.write_var_u32(len).unwrap();
-                        current_server.write_all(&buf).unwrap();
-                        // dbg!(id);
-                        // println!("-> ID: 0x{:X} {}", id, id);
+                        client.write_var_u32(len).unwrap();
+                        client.write_all(&buf).unwrap();
                     }
                 }
             }
         }
-    });
-    // loop {}
+    }
 }
-
-pub struct Server {
-    pub listener: TcpListener,
-    pub motd: String,
+// pub struct Server {
+//     pub listener: TcpListener,
+//     pub motd: String,
+// }
+pub struct ProxiedPlayer {
+    current_server: TcpStream,
+    stream: TcpStream
 }
-
 trait MyceliumRead {
     fn read_string(&mut self) -> Option<String>;
 }
