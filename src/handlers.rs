@@ -1,17 +1,16 @@
 use std::{
-    io::{BufRead, Cursor, Read, Write},
+    io::{Cursor, Read, Write},
     net::TcpStream,
     sync::mpsc::{Receiver, Sender, TryRecvError},
 };
 
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
-use hexdump::hexdump;
 use minecraft_varint::{VarIntRead, VarIntWrite};
 use nbt::Blob;
 
 use crate::{
     handlers,
-    packets::{self, MC1_17_1},
+    packets::{self},
     MyceliumRead, MyceliumWrite, DEFAULT_SERVER_NAME, SERVERS,
 };
 
@@ -163,8 +162,8 @@ impl PlayerConnection {
 
                 if state == 0 && id == 0 {
                     pv = read_only_copy.read_var_u32().unwrap();
-                    let address = read_only_copy.read_string().unwrap();
-                    let port = read_only_copy.read_u16::<BigEndian>().unwrap();
+                    let _address = read_only_copy.read_string().unwrap();
+                    let _port = read_only_copy.read_u16::<BigEndian>().unwrap();
                     let next_state = read_only_copy.read_var_u32().unwrap();
                     state = next_state;
 
@@ -323,18 +322,20 @@ pub fn handle_server(
                     read_only_copy.read(&mut bytes).unwrap();
 
                     if id == "bungeecord:main" {
-                        let segments = bytes.split(|c| *c == 0u8).skip(1).collect::<Vec<_>>();
-                        for segment in segments {
-                            if segment.len() == 0 {
-                                continue;
-                            }
-                            let len = segment[0];
-                            let text = std::str::from_utf8(&segment[1..]).unwrap();
+                        let segments = bytes
+                            .split(|c| *c == 0u8)
+                            .filter(|s| s.len() > 0)
+                            .collect::<Vec<_>>();
+                        let segments_text = segments
+                            .iter()
+                            .map(|s| std::str::from_utf8(&s[1..]).unwrap())
+                            .collect::<Vec<_>>();
+                        let mut address = DEFAULT_SERVER_NAME;
 
-                            // dbg!(text);
+                        if segments_text[0] == "Connect" {
+                            address = SERVERS.get(segments_text[1]).unwrap();
                         }
 
-                        let address = SERVERS.get("sv").unwrap();
                         let new_server = TcpStream::connect(address);
                         if new_server.is_err() {
                             // self.send_chat_message(format!(
@@ -358,6 +359,7 @@ pub fn handle_server(
                                 server = new_server
                             }
                             Err(disconnect_reason) => {
+                                println!("Disconnect reason: {}", disconnect_reason);
                                 // self.send_chat_message(format!(
                                 //     "§4Disconnected. reason: §r{}!",
                                 //     disconnect_reason
@@ -400,7 +402,7 @@ pub fn handle_server(
                             match pv {
                                 packets::MC1_18_1 | packets::MC1_17_1 | packets::MC1_16_5 => {
                                     let _eid = read_only_copy.read_i32::<BigEndian>().unwrap();
-                                    let is_hardcore = read_only_copy.read_i8().unwrap() != 0;
+                                    let _is_hardcore = read_only_copy.read_i8().unwrap() != 0;
                                     let gamemode = read_only_copy.read_u8().unwrap();
                                     let prevgamemode = read_only_copy.read_u8().unwrap();
                                     let world_count = read_only_copy.read_var_u32().unwrap();
@@ -411,7 +413,7 @@ pub fn handle_server(
                                         nbt::from_reader(&mut read_only_copy).unwrap();
                                     let dimension: Blob =
                                         nbt::from_reader(&mut read_only_copy).unwrap();
-                                    let world_name = read_only_copy.read_string().unwrap();
+                                    let _world_name = read_only_copy.read_string().unwrap();
                                     let hashed_seed =
                                         read_only_copy.read_i64::<BigEndian>().unwrap();
 

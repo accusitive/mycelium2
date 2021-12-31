@@ -1,27 +1,19 @@
-use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use handlers::handle_client;
 use minecraft_varint::{VarIntRead, VarIntWrite};
 use std::collections::HashMap;
-use std::io::{Cursor, Write};
-use std::net::TcpStream;
-use std::sync::mpsc::{Receiver, Sender, TryRecvError};
+use std::io::Write;
+
 use std::{io::Read, net::TcpListener};
 
 const DEFAULT_SERVER_NAME: &str = "lobby";
 lazy_static::lazy_static! {
     static ref SERVERS: HashMap<&'static str, &'static str> = {
         let mut m =  HashMap::new();
-        // m.insert("lobby", "127.0.0.1:9595");
-        // m.insert("survival", "127.0.0.1:9596");
+
 
         m.insert("lobby", "127.0.0.1:25565");
         m.insert("sv", "127.0.0.1:25566");
-        // m.insert("freedom", "play.totalfreedom.me:25565");
-        // m.insert("survival", "127.0.0.1:25566");
 
-        // m.insert("flat", "127.0.0.1:35565");
-        // m.insert("a", "127.0.0.1:8001");
-        // m.insert("b", "127.0.0.1:8002");
 
         m
     };
@@ -40,14 +32,6 @@ fn main() {
 }
 mod handlers;
 
-// pub struct Server {
-//     pub listener: TcpListener,
-//     pub motd: String,
-// }
-pub struct ProxiedPlayer {
-    current_server: TcpStream,
-    stream: TcpStream,
-}
 trait MyceliumRead {
     fn read_string(&mut self) -> Option<String>;
 }
@@ -73,6 +57,9 @@ impl<X: Write> MyceliumWrite for X {
 
 #[test]
 fn test_login() {
+    use byteorder::{BigEndian, WriteBytesExt};
+
+    use std::net::TcpStream;
     let mut server = TcpStream::connect("127.0.0.1:35565").unwrap();
     // handshake
     {
