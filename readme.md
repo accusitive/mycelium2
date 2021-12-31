@@ -8,5 +8,5 @@
 | 1.15.2  | No                 | yes          | yes    |
 | 1.14.4  | No                 | yes          | yes    |
 | 1.13.2  | No                 | no          | yes    |
-| 1.12.4  | No                 | no          | yes    |
+| 1.12.2  | No                 | no          | yes    |
 
