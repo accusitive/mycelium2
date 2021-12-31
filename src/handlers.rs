@@ -1,5 +1,5 @@
 use std::{
-    io::{Cursor, Read, Write, BufRead},
+    io::{BufRead, Cursor, Read, Write},
     net::TcpStream,
     sync::mpsc::{Receiver, Sender, TryRecvError},
 };
@@ -23,18 +23,21 @@ pub fn handle_client(bclient: TcpStream) {
     let client = bclient.try_clone().unwrap();
     let server = bserver.try_clone().unwrap();
     // *client.unwrap() = TcpStream::connect("").unwrap();
-    let (tx, rx) = std::sync::mpsc::channel::<DataChange>();
+    let (to_server, from_client) = std::sync::mpsc::channel::<DataChange>();
+    let (to_client, from_server) = std::sync::mpsc::channel::<TcpStream>();
+
     let mut threads = vec![];
     threads.push((
         0,
-        std::thread::spawn(move || handle_server(rx, server, client)),
+        std::thread::spawn(move || handle_server(from_client, to_client, server, client)),
     ));
 
     // Client reading thread
     let mut player = PlayerConnection {
         client: bclient.try_clone().unwrap(),
         current_server: bserver.try_clone().unwrap(),
-        tx: tx,
+        to_server,
+        from_server: from_server,
     };
     threads.push((1, std::thread::spawn(move || player.handle())));
     'f: for (id, thread) in threads {
@@ -61,7 +64,9 @@ pub enum DataChange {
 }
 struct PlayerConnection {
     current_server: TcpStream,
-    tx: Sender<DataChange>,
+
+    to_server: Sender<DataChange>,
+    from_server: Receiver<TcpStream>,
     client: TcpStream,
 }
 
@@ -74,6 +79,16 @@ impl PlayerConnection {
         let mut pv = 0;
 
         loop {
+            match self.from_server.try_recv() {
+                Ok(new_server) => {
+                    self.current_server = new_server;
+
+                    // DataChange::HandShook(npv) => pv = npv,
+                }
+                // Not really an error
+                Err(TryRecvError::Empty) => {}
+                Err(e) => panic!("Sender error; {}", e),
+            }
             if self.client.read(&mut []).is_err() {
                 println!("Braking.");
                 break;
@@ -111,58 +126,21 @@ impl PlayerConnection {
                                 let mut new_server = new_server.unwrap();
                                 current_server_name = args[1].to_string();
 
-                                // self.write_handshake(&mut new_server, 340, "localhost", 8001, 2);
-                                self.write_handshake(&mut new_server, pv, "localhost", 8001, 2);
-
-                                {
-                                    let mut v: Vec<u8> = vec![];
-                                    v.write_var_u32(0x0).unwrap();
-                                    v.write_string("F8H".to_string());
-                                    new_server.write_var_u32(v.len() as u32).unwrap();
-                                    new_server.write_all(&v).unwrap();
-                                }
-                                {
-                                    let len = new_server.read_var_u32().unwrap();
-                                    let id = new_server.read_var_u32().unwrap();
-                                    dbg!(len, id);
-                                    match id {
-                                        0 => {
-                                            let disconnect_reason =
-                                                new_server.read_string().unwrap();
-                                            self.send_chat_message(format!(
-                                                "§4Disconnected. reason: §r{}!",
-                                                disconnect_reason
-                                            ));
-
-                                            new_server.shutdown(std::net::Shutdown::Both).unwrap();
-                                            continue;
-                                        }
-                                        2 => {
-                                            // let uuid = new_server.read_string().unwrap();
-                                            if pv > packets::MC1_15_2 {
-                                                let uuid =
-                                                    new_server.read_i128::<BigEndian>().unwrap();
-                                                dbg!(uuid);
-                                            } else {
-                                                let uuid = new_server.read_string().unwrap();
-                                                dbg!(uuid);
-                                            }
-
-                                            // let uuid = new_server.read_i128::<BigEndian>().unwrap();
-                                            let username = new_server.read_string().unwrap();
-                                            
-
-                                            self.current_server
-                                                .shutdown(std::net::Shutdown::Both)
-                                                .unwrap();
-                                            dbg!(username);
-
-                                            // dbg!("read", new_server.read(&mut []).unwrap());
-                                        }
-                                        _ => unimplemented!(),
+                                write_handshake(&mut new_server, pv, "localhost", 8001, 2);
+                                write_login_start(&mut new_server);
+                                match ensure_login_valid(&mut new_server, pv) {
+                                    Ok(_) => println!("Connected correctly."),
+                                    Err(disconnect_reason) => {
+                                        self.send_chat_message(format!(
+                                            "§4Disconnected. reason: §r{}!",
+                                            disconnect_reason
+                                        ));
+                                        new_server.shutdown(std::net::Shutdown::Both).unwrap();
+                                        continue;
                                     }
                                 }
-                                self.tx
+
+                                self.to_server
                                     .send(handlers::DataChange::TcpStream(
                                         new_server.try_clone().unwrap(),
                                     ))
@@ -190,12 +168,12 @@ impl PlayerConnection {
                     let next_state = read_only_copy.read_var_u32().unwrap();
                     state = next_state;
 
-                    self.tx.send(DataChange::HandShook(pv)).unwrap();
+                    self.to_server.send(DataChange::HandShook(pv)).unwrap();
 
                     // dbg!(pv,address,port,next_state);
                     println!("Zero id");
                 }
-                if state == 2 && id == 0x26   {
+                if state == 2 && id == 0x26 {
                     let mut v: Vec<u8> = vec![];
                     v.write_var_u32(0x0a).unwrap(); // Plugin channel c2s
 
@@ -216,6 +194,7 @@ impl PlayerConnection {
             }
         }
     }
+
     fn send_chat_message<T: ToString>(&mut self, chat: T) {
         println!("Shouldve logged {}", chat.to_string());
         // let mut buf = vec![];
@@ -227,36 +206,74 @@ impl PlayerConnection {
         // self.client.write_var_u32(buf.len() as u32).unwrap();
         // self.client.write_all(&buf).unwrap();
     }
-    fn write_handshake(
-        &self,
-        stream: &mut TcpStream,
-        pv: u32,
-        address: &str,
-        port: u16,
-        next_state: u32,
-    ) {
-        let mut v: Vec<u8> = vec![];
+}
+fn ensure_login_valid(new_server: &mut TcpStream, pv: u32) -> Result<(), String> {
+    let len = new_server.read_var_u32().unwrap();
+    let id = new_server.read_var_u32().unwrap();
+    dbg!(len, id);
+    match id {
+        0 => {
+            let disconnect_reason = new_server.read_string().unwrap();
+            Err(disconnect_reason)
 
-        v.write_var_u32(0x0).unwrap();
-        v.write_var_u32(pv).unwrap();
-        v.write_string(address.to_string());
-        v.write_u16::<BigEndian>(port).unwrap();
-        v.write_var_u32(next_state).unwrap();
+            // new_server.shutdown(std::net::Shutdown::Both).unwrap();
+            // continue;
+        }
+        2 => {
+            // let uuid = new_server.read_string().unwrap();
+            if pv > packets::MC1_15_2 {
+                let uuid = new_server.read_i128::<BigEndian>().unwrap();
+                dbg!(uuid);
+            } else {
+                let uuid = new_server.read_string().unwrap();
+                dbg!(uuid);
+            }
 
-        stream.write_var_u32(v.len() as u32).unwrap();
-        stream.write_all(&v).unwrap();
-    }
-    fn transfer(&mut self) {
-        
+            // let uuid = new_server.read_i128::<BigEndian>().unwrap();
+            let username = new_server.read_string().unwrap();
+
+            // self.current_server
+            //     .shutdown(std::net::Shutdown::Both)
+            //     .unwrap();
+            dbg!(username);
+            Ok(())
+
+            // dbg!("read", new_server.read(&mut []).unwrap());
+        }
+        _ => unimplemented!(),
     }
 }
-pub fn handle_server(rx: Receiver<DataChange>, mut server: TcpStream, mut client: TcpStream) {
+fn write_handshake(stream: &mut TcpStream, pv: u32, address: &str, port: u16, next_state: u32) {
+    let mut v: Vec<u8> = vec![];
+
+    v.write_var_u32(0x0).unwrap();
+    v.write_var_u32(pv).unwrap();
+    v.write_string(address.to_string());
+    v.write_u16::<BigEndian>(port).unwrap();
+    v.write_var_u32(next_state).unwrap();
+
+    stream.write_var_u32(v.len() as u32).unwrap();
+    stream.write_all(&v).unwrap();
+}
+fn write_login_start(stream: &mut TcpStream) {
+    let mut v: Vec<u8> = vec![];
+    v.write_var_u32(0x0).unwrap();
+    v.write_string("F8H".to_string());
+    stream.write_var_u32(v.len() as u32).unwrap();
+    stream.write_all(&v).unwrap();
+}
+pub fn handle_server(
+    from_client: Receiver<DataChange>,
+    to_client: Sender<TcpStream>,
+    mut server: TcpStream,
+    mut client: TcpStream,
+) {
     {
         let mut recently_transferred = false;
         let mut pv = 0;
         let mut has_sent_plugins = false;
         loop {
-            match rx.try_recv() {
+            match from_client.try_recv() {
                 Ok(data_change) => {
                     // dbg!(&new_server);
                     match data_change {
@@ -301,23 +318,68 @@ pub fn handle_server(rx: Receiver<DataChange>, mut server: TcpStream, mut client
                     println!("PLUGIN");
                     let id = read_only_copy.read_string().unwrap();
                     dbg!(&id);
-                    
+
                     let mut bytes = vec![0; (len - (id.len() as u32)).try_into().unwrap()];
                     read_only_copy.read(&mut bytes).unwrap();
-                    
+
                     if id == "bungeecord:main" {
                         let segments = bytes.split(|c| *c == 0u8).skip(1).collect::<Vec<_>>();
                         for segment in segments {
                             if segment.len() == 0 {
-                                continue
+                                continue;
                             }
                             let len = segment[0];
                             let text = std::str::from_utf8(&segment[1..]).unwrap();
-                            dbg!(text);
+
+                            // dbg!(text);
                         }
+
+                        let address = SERVERS.get("sv").unwrap();
+                        let new_server = TcpStream::connect(address);
+                        if new_server.is_err() {
+                            // self.send_chat_message(format!(
+                            //     "§4Failed to connect to server, §r{}! (Tell the admins!).",
+                            //     new_server.unwrap_err()
+                            // ));
+                            continue;
+                        }
+                        let mut new_server = new_server.unwrap();
+                        // current_server_name = args[1].to_string();
+
+                        write_handshake(&mut new_server, pv, "localhost", 8001, 2);
+                        write_login_start(&mut new_server);
+                        match ensure_login_valid(&mut new_server, pv) {
+                            Ok(_) => {
+                                println!("Connected correctly.");
+                                // server.shutdown(std::net::Shutdown::Both);
+                                to_client.send(new_server.try_clone().unwrap()).unwrap();
+                                recently_transferred = true;
+                                has_sent_plugins = false;
+                                server = new_server
+                            }
+                            Err(disconnect_reason) => {
+                                // self.send_chat_message(format!(
+                                //     "§4Disconnected. reason: §r{}!",
+                                //     disconnect_reason
+                                // ));
+                                // new_server.shutdown(std::net::Shutdown::Both).unwrap();
+                                continue;
+                            }
+                        }
+
+                        // self.tx
+                        //     .send(handlers::DataChange::TcpStream(
+                        //         new_server.try_clone().unwrap(),
+                        //     ))
+                        //     .unwrap();
+                        // self.current_server = new_server;
+
+                        println!("Finished connecting");
+                        // This stops it from forwarding to the server that you executed the /join command
+                        continue;
+
                         // dbg!(segments);
                     }
-                    
                 }
                 match id {
                     // Join game
