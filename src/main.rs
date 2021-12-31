@@ -7,11 +7,17 @@ use std::net::TcpStream;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::{io::Read, net::TcpListener};
 
+const DEFAULT_SERVER_NAME: &str = "lobby";
 lazy_static::lazy_static! {
     static ref SERVERS: HashMap<&'static str, &'static str> = {
         let mut m =  HashMap::new();
+        // m.insert("lobby", "127.0.0.1:9595");
+        // m.insert("survival", "127.0.0.1:9596");
+
         m.insert("lobby", "127.0.0.1:25565");
-        m.insert("survival", "127.0.0.1:25566");
+        m.insert("sv", "127.0.0.1:25566");
+        // m.insert("freedom", "play.totalfreedom.me:25565");
+        // m.insert("survival", "127.0.0.1:25566");
 
         // m.insert("flat", "127.0.0.1:35565");
         // m.insert("a", "127.0.0.1:8001");
@@ -20,7 +26,6 @@ lazy_static::lazy_static! {
         m
     };
 }
-const DEFAULT_SERVER_NAME: &str = "lobby";
 mod packets;
 fn main() {
     // let s = Server {

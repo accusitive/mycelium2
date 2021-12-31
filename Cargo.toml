@@ -9,3 +9,7 @@ minecraft-varint = "0.2.0"
 colored = "2.0.0"
 lazy_static = "1.4.0"
 hematite-nbt = "0.5.2"
+[features]
+"1.16.5" = []
+"1.18.1" = []
+default = ["1.16.5"]

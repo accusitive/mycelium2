@@ -1,5 +1,5 @@
 use std::{
-    io::{Cursor, Read, Write},
+    io::{Cursor, Read, Write, BufRead},
     net::TcpStream,
     sync::mpsc::{Receiver, Sender, TryRecvError},
 };
@@ -9,7 +9,11 @@ use hexdump::hexdump;
 use minecraft_varint::{VarIntRead, VarIntWrite};
 use nbt::Blob;
 
-use crate::{MyceliumRead, MyceliumWrite, DEFAULT_SERVER_NAME, SERVERS};
+use crate::{
+    handlers,
+    packets::{self, MC1_17_1},
+    MyceliumRead, MyceliumWrite, DEFAULT_SERVER_NAME, SERVERS,
+};
 
 pub fn handle_client(bclient: TcpStream) {
     let bserver = TcpStream::connect(SERVERS.get(DEFAULT_SERVER_NAME).unwrap()).unwrap();
@@ -19,8 +23,12 @@ pub fn handle_client(bclient: TcpStream) {
     let client = bclient.try_clone().unwrap();
     let server = bserver.try_clone().unwrap();
     // *client.unwrap() = TcpStream::connect("").unwrap();
-    let (tx, rx) = std::sync::mpsc::channel::<TcpStream>();
-    std::thread::spawn(move || handle_server(rx, server, client));
+    let (tx, rx) = std::sync::mpsc::channel::<DataChange>();
+    let mut threads = vec![];
+    threads.push((
+        0,
+        std::thread::spawn(move || handle_server(rx, server, client)),
+    ));
 
     // Client reading thread
     let mut player = PlayerConnection {
@@ -28,12 +36,32 @@ pub fn handle_client(bclient: TcpStream) {
         current_server: bserver.try_clone().unwrap(),
         tx: tx,
     };
-    std::thread::spawn(move || player.handle());
+    threads.push((1, std::thread::spawn(move || player.handle())));
+    'f: for (id, thread) in threads {
+        // thread.join().unwrap();
+        match thread.join() {
+            _ => {
+                println!("JOINED!");
+                if id == 0 {
+                    bserver.shutdown(std::net::Shutdown::Both).unwrap();
+                } else {
+                    bclient.shutdown(std::net::Shutdown::Both).unwrap();
+                }
+                break 'f;
+            }
+        }
+    }
 }
-
+pub enum DataChange {
+    TcpStream(TcpStream),
+    HandShook(
+        /// pv
+        u32,
+    ),
+}
 struct PlayerConnection {
     current_server: TcpStream,
-    tx: Sender<TcpStream>,
+    tx: Sender<DataChange>,
     client: TcpStream,
 }
 
@@ -42,8 +70,14 @@ impl PlayerConnection {
         // let mut current_server = server;
         let mut current_server_name = DEFAULT_SERVER_NAME.to_string();
         println!("New client connected.");
+        let mut state = 0;
+        let mut pv = 0;
 
         loop {
+            if self.client.read(&mut []).is_err() {
+                println!("Braking.");
+                break;
+            }
             let len = match { self.client.read_var_u32() } {
                 Ok(l) => l,
                 Err(_) => continue,
@@ -53,29 +87,14 @@ impl PlayerConnection {
             self.client.read(&mut buf).unwrap();
             {
                 // Copy of packet data to inspect without modifying the original buffer
-                let mut copy_of_packet = Cursor::new(buf.clone());
-                let id = copy_of_packet.read_var_u32().unwrap();
-                // Tab complete
-                // if id == 0x01 {
-                if false {
-                    let text = copy_of_packet.read_string().unwrap();
-                    if text.starts_with("/join ") {
-                        let mut buf = vec![];
-                        buf.write_var_u32(0x0E).unwrap();
-                        buf.write_var_u32(SERVERS.len() as u32).unwrap();
-                        for server in SERVERS.iter() {
-                            buf.write_string(server.0.to_string());
-                        }
-                        self.client.write_var_u32(buf.len() as u32).unwrap();
-                        self.client.write_all(&buf).unwrap();
-                    }
-                    continue;
-                }
-                // Send message
-                if id == 0x03 {
-                    let msg = copy_of_packet.read_string().unwrap();
+                let mut read_only_copy = Cursor::new(buf.clone());
+                let id = read_only_copy.read_var_u32().unwrap();
+                // dbg!(id);
+                if id == packets::get_chat_c2s(pv) {
+                    println!("AAA");
+                    let msg = read_only_copy.read_string().unwrap();
                     dbg!(&msg);
-                    if msg.starts_with("/join ") {
+                    if msg.starts_with("/server ") {
                         let args = msg.split_ascii_whitespace().collect::<Vec<_>>();
 
                         let address = SERVERS.get(args[1]);
@@ -93,7 +112,7 @@ impl PlayerConnection {
                                 current_server_name = args[1].to_string();
 
                                 // self.write_handshake(&mut new_server, 340, "localhost", 8001, 2);
-                                self.write_handshake(&mut new_server, 757, "localhost", 8001, 2);
+                                self.write_handshake(&mut new_server, pv, "localhost", 8001, 2);
 
                                 {
                                     let mut v: Vec<u8> = vec![];
@@ -120,20 +139,34 @@ impl PlayerConnection {
                                         }
                                         2 => {
                                             // let uuid = new_server.read_string().unwrap();
-                                            let uuid = new_server.read_i128::<BigEndian>().unwrap();
+                                            if pv > packets::MC1_15_2 {
+                                                let uuid =
+                                                    new_server.read_i128::<BigEndian>().unwrap();
+                                                dbg!(uuid);
+                                            } else {
+                                                let uuid = new_server.read_string().unwrap();
+                                                dbg!(uuid);
+                                            }
+
+                                            // let uuid = new_server.read_i128::<BigEndian>().unwrap();
                                             let username = new_server.read_string().unwrap();
+                                            
+
                                             self.current_server
                                                 .shutdown(std::net::Shutdown::Both)
                                                 .unwrap();
-
-                                            dbg!(uuid, username);
+                                            dbg!(username);
 
                                             // dbg!("read", new_server.read(&mut []).unwrap());
                                         }
                                         _ => unimplemented!(),
                                     }
                                 }
-                                self.tx.send(new_server.try_clone().unwrap()).unwrap();
+                                self.tx
+                                    .send(handlers::DataChange::TcpStream(
+                                        new_server.try_clone().unwrap(),
+                                    ))
+                                    .unwrap();
                                 self.current_server = new_server;
 
                                 println!("Finished connecting");
@@ -148,6 +181,28 @@ impl PlayerConnection {
                             }
                         }
                     }
+                }
+
+                if state == 0 && id == 0 {
+                    pv = read_only_copy.read_var_u32().unwrap();
+                    let address = read_only_copy.read_string().unwrap();
+                    let port = read_only_copy.read_u16::<BigEndian>().unwrap();
+                    let next_state = read_only_copy.read_var_u32().unwrap();
+                    state = next_state;
+
+                    self.tx.send(DataChange::HandShook(pv)).unwrap();
+
+                    // dbg!(pv,address,port,next_state);
+                    println!("Zero id");
+                }
+                if state == 2 && id == 0x26   {
+                    let mut v: Vec<u8> = vec![];
+                    v.write_var_u32(0x0a).unwrap(); // Plugin channel c2s
+
+                    v.write_string("minecraft:register".to_string());
+                    v.write_string("mycelium:data".to_string());
+                    self.current_server.write_var_u32(v.len() as u32).unwrap();
+                    self.current_server.write_all(&v).unwrap();
                 }
                 // For intercepting normal sending.
                 match id {
@@ -191,17 +246,27 @@ impl PlayerConnection {
         stream.write_var_u32(v.len() as u32).unwrap();
         stream.write_all(&v).unwrap();
     }
+    fn transfer(&mut self) {
+        
+    }
 }
-pub fn handle_server(rx: Receiver<TcpStream>, mut server: TcpStream, mut client: TcpStream) {
+pub fn handle_server(rx: Receiver<DataChange>, mut server: TcpStream, mut client: TcpStream) {
     {
         let mut recently_transferred = false;
+        let mut pv = 0;
+        let mut has_sent_plugins = false;
         loop {
             match rx.try_recv() {
-                Ok(new_server) => {
-                    dbg!(&new_server);
-
-                    server = new_server;
-                    recently_transferred = true;
+                Ok(data_change) => {
+                    // dbg!(&new_server);
+                    match data_change {
+                        DataChange::TcpStream(new_server) => {
+                            server = new_server;
+                            recently_transferred = true;
+                            has_sent_plugins = false;
+                        }
+                        DataChange::HandShook(npv) => pv = npv,
+                    }
                 }
                 // Not really an error
                 Err(TryRecvError::Empty) => {}
@@ -216,85 +281,157 @@ pub fn handle_server(rx: Receiver<TcpStream>, mut server: TcpStream, mut client:
             let mut buf = vec![0; len as usize];
             server.read_exact(&mut buf).unwrap();
             {
-                let mut b = Cursor::new(buf.clone());
+                let mut read_only_copy = Cursor::new(buf.clone());
 
-                let id = b.read_var_u32().unwrap();
-                // Printing takes too long when printing chunk data. Its useless to the human eye anyway.
-                // if id == 0x23 {
-                if id == 0x26 {
-                    client.write_var_u32(len).unwrap();
-                    client.write_all(&buf).unwrap();
+                let id = read_only_copy.read_var_u32().unwrap();
+                // println!("{:X}", id);
+                if pv != 0 && !has_sent_plugins {
+                    {
+                        let mut v: Vec<u8> = vec![];
+                        v.write_var_u32(0x0a).unwrap(); // Plugin channel c2s
 
-                    if recently_transferred {
-                        // let x= vec![];
-
-                        // hexdump(&b.get_ref());
-                        // let dim: nbt::Map<String, String> = nbt::from_reader(b).unwrap();
-                        // dbg!(&dim);
-                        let _eid = b.read_i32::<BigEndian>().unwrap();
-                        let h = b.read_i8().unwrap() != 0;
-                        let gamemode = b.read_u8().unwrap();
-                        let prevgamemode = b.read_u8().unwrap();
-                        let world_count = b.read_var_u32().unwrap();
-                        let worlds = (0..world_count)
-                            .map(|_| b.read_string().unwrap())
-                            .collect::<Vec<_>>();
-                        let codec: Blob = nbt::from_reader(&mut b).unwrap();
-                        let dimension: Blob = nbt::from_reader(&mut b).unwrap();
-                        let world_name = b.read_string().unwrap();
-                        let hashed_seed = b.read_i64::<BigEndian>().unwrap();
-
-                        dbg!(worlds, codec, &dimension);
-                        // let dimension = b.read_i32::<BigEndian>().unwrap();
-                        // let difficulty = b.read_u8().unwrap();
-                        // let _maxplayers = b.read_u8().unwrap();
-                        // let level_type = b.read_string().unwrap_or("default".to_string());
-                        // macro_rules! respawn {
-                        //     ($dim: expr) => {
-                            let mut respawn = |dim| {
-                                let mut v = vec![];
-                                v.write_var_u32(0x3d).unwrap();
-                                nbt::to_writer(&mut v, &dim, None).unwrap();
-                                v.write_string("minecraft:doesthismatter".to_string());
-                                v.write_i64::<BigEndian>(hashed_seed);
-                                v.write_u8(gamemode);
-                                v.write_u8(prevgamemode);
-                                // is debug
-                                v.write_u8(false as u8);
-                                // is flat
-                                v.write_u8(false as u8);
-                                // copy metadata
-                                v.write_u8(false as u8);
-
-                                client.write_var_u32(v.len() as u32).unwrap();
-                                client.write_all(&v).unwrap();
-                            };
-                               
-                            // };
-                        // }
-                        respawn(dimension);
-                        // respawn!(dimension);
-
-                        // let fake_dimension = match dimension {
-                        //     -1 => 1,
-                        //     0 => -1,
-                        //     1 => 0,
-                        //     _ => panic!(),
-                        // };
-                        // send_respawn(fake_dimension);
-                        // send_respawn(dimension);
-                        recently_transferred = false;
+                        v.write_string("minecraft:register".to_string());
+                        v.write_all(b"bungeecord:main\0\0").unwrap();
+                        server.write_var_u32(v.len() as u32).unwrap();
+                        server.write_all(&v).unwrap();
                     }
+                    has_sent_plugins = true;
                 }
-
+                if id == 0x18 {
+                    println!("PLUGIN");
+                    let id = read_only_copy.read_string().unwrap();
+                    dbg!(&id);
+                    
+                    let mut bytes = vec![0; (len - (id.len() as u32)).try_into().unwrap()];
+                    read_only_copy.read(&mut bytes).unwrap();
+                    
+                    if id == "bungeecord:main" {
+                        let segments = bytes.split(|c| *c == 0u8).skip(1).collect::<Vec<_>>();
+                        for segment in segments {
+                            if segment.len() == 0 {
+                                continue
+                            }
+                            let len = segment[0];
+                            let text = std::str::from_utf8(&segment[1..]).unwrap();
+                            dbg!(text);
+                        }
+                        // dbg!(segments);
+                    }
+                    
+                }
                 match id {
                     // Join game
-                    0x26 => {}
-                    0x3d => {
-                        hexdump(&buf);
+                    // 0x18 => {
+                    //     println!("PLUGIN");
+                    // }
+                    i if pv != 0 && i == packets::get_join_game(pv) => {
                         client.write_var_u32(len).unwrap();
                         client.write_all(&buf).unwrap();
+                        println!("JOINING GAME");
+                        if recently_transferred {
+                            // let x= vec![];
+
+                            // hexdump(&b.get_ref());
+                            // let dim: nbt::Map<String, String> = nbt::from_reader(b).unwrap();
+                            // dbg!(&dim);
+                            println!("pv {}", pv);
+                            match pv {
+                                packets::MC1_18_1 | packets::MC1_17_1 | packets::MC1_16_5 => {
+                                    let _eid = read_only_copy.read_i32::<BigEndian>().unwrap();
+                                    let is_hardcore = read_only_copy.read_i8().unwrap() != 0;
+                                    let gamemode = read_only_copy.read_u8().unwrap();
+                                    let prevgamemode = read_only_copy.read_u8().unwrap();
+                                    let world_count = read_only_copy.read_var_u32().unwrap();
+                                    let worlds = (0..world_count)
+                                        .map(|_| read_only_copy.read_string().unwrap())
+                                        .collect::<Vec<_>>();
+                                    let codec: Blob =
+                                        nbt::from_reader(&mut read_only_copy).unwrap();
+                                    let dimension: Blob =
+                                        nbt::from_reader(&mut read_only_copy).unwrap();
+                                    let world_name = read_only_copy.read_string().unwrap();
+                                    let hashed_seed =
+                                        read_only_copy.read_i64::<BigEndian>().unwrap();
+
+                                    dbg!(worlds, codec, &dimension);
+                                    let mut respawn = |dim| {
+                                        let mut v = vec![];
+                                        let rid = packets::get_respawn_id(pv);
+                                        dbg!(&rid);
+                                        v.write_var_u32(rid).unwrap();
+
+                                        nbt::to_writer(&mut v, &dim, None).unwrap();
+                                        v.write_string("mycelium:transfer".to_string());
+                                        v.write_i64::<BigEndian>(hashed_seed).unwrap();
+                                        v.write_u8(gamemode).unwrap();
+                                        v.write_u8(prevgamemode).unwrap();
+                                        // is debug
+                                        v.write_u8(false as u8).unwrap();
+                                        // is flat
+                                        v.write_u8(false as u8).unwrap();
+                                        // copy metadata
+                                        v.write_u8(false as u8).unwrap();
+
+                                        client.write_var_u32(v.len() as u32).unwrap();
+                                        client.write_all(&v).unwrap();
+                                    };
+                                    respawn(dimension);
+                                }
+                                packets::MC1_15_2 | packets::MC1_14_4 => {
+                                    let _eid = read_only_copy.read_i32::<BigEndian>().unwrap();
+                                    let gamemode = read_only_copy.read_u8().unwrap();
+                                    let dimension = read_only_copy.read_i32::<BigEndian>().unwrap();
+                                    let hashed_seed = if pv > packets::MC1_14_4 {
+                                        Some(read_only_copy.read_i64::<BigEndian>().unwrap())
+                                    } else {
+                                        None
+                                    };
+
+                                    read_only_copy.read_u8().unwrap();
+                                    let level_type = read_only_copy.read_string().unwrap();
+
+                                    let mut respawn = |dim| {
+                                        let mut v = vec![];
+                                        let rid = packets::get_respawn_id(pv);
+                                        dbg!(&rid);
+                                        v.write_var_u32(rid).unwrap();
+
+                                        v.write_i32::<BigEndian>(dim).unwrap();
+                                        if hashed_seed.is_some() {
+                                            v.write_i64::<BigEndian>(hashed_seed.unwrap()).unwrap();
+                                        }
+                                        v.write_u8(gamemode).unwrap();
+                                        v.write_string(level_type.to_string());
+                                        client.write_var_u32(v.len() as u32).unwrap();
+                                        client.write_all(&v).unwrap();
+                                    };
+                                    let fake_dimension = match dimension {
+                                        -1 => 1,
+                                        0 => -1,
+                                        1 => 0,
+                                        _ => panic!(),
+                                    };
+                                    respawn(fake_dimension);
+                                    respawn(dimension);
+                                }
+
+                                _ => todo!("Unknown protocol {}", pv),
+                            }
+
+                            // respawn!(dimension);
+
+                            // let fake_dimension = match dimension {
+                            //     -1 => 1,
+                            //     0 => -1,
+                            //     1 => 0,
+                            //     _ => panic!(),
+                            // };
+                            // send_respawn(fake_dimension);
+                            // send_respawn(dimension);
+                            recently_transferred = false;
+                        }
                     }
+
                     _ => {
                         client.write_var_u32(len).unwrap();
                         client.write_all(&buf).unwrap();
