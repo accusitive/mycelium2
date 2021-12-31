@@ -11,9 +11,11 @@ lazy_static::lazy_static! {
     static ref SERVERS: HashMap<&'static str, &'static str> = {
         let mut m =  HashMap::new();
         m.insert("lobby", "127.0.0.1:25565");
-        m.insert("flat", "127.0.0.1:35565");
-        m.insert("a", "127.0.0.1:8001");
-        m.insert("b", "127.0.0.1:8002");
+        m.insert("survival", "127.0.0.1:25566");
+
+        // m.insert("flat", "127.0.0.1:35565");
+        // m.insert("a", "127.0.0.1:8001");
+        // m.insert("b", "127.0.0.1:8002");
 
         m
     };

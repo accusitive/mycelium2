@@ -5,7 +5,9 @@ use std::{
 };
 
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
+use hexdump::hexdump;
 use minecraft_varint::{VarIntRead, VarIntWrite};
+use nbt::Blob;
 
 use crate::{MyceliumRead, MyceliumWrite, DEFAULT_SERVER_NAME, SERVERS};
 
@@ -54,7 +56,8 @@ impl PlayerConnection {
                 let mut copy_of_packet = Cursor::new(buf.clone());
                 let id = copy_of_packet.read_var_u32().unwrap();
                 // Tab complete
-                if id == 0x01 {
+                // if id == 0x01 {
+                if false {
                     let text = copy_of_packet.read_string().unwrap();
                     if text.starts_with("/join ") {
                         let mut buf = vec![];
@@ -69,8 +72,9 @@ impl PlayerConnection {
                     continue;
                 }
                 // Send message
-                if id == 0x02 {
+                if id == 0x03 {
                     let msg = copy_of_packet.read_string().unwrap();
+                    dbg!(&msg);
                     if msg.starts_with("/join ") {
                         let args = msg.split_ascii_whitespace().collect::<Vec<_>>();
 
@@ -79,13 +83,18 @@ impl PlayerConnection {
                             if args[1] != current_server_name {
                                 let new_server = TcpStream::connect(address);
                                 if new_server.is_err() {
-                                    self.send_chat_message(format!("§4Failed to connect to server, §r{}! (Tell the admins!).", new_server.unwrap_err()));
+                                    self.send_chat_message(format!(
+                                        "§4Failed to connect to server, §r{}! (Tell the admins!).",
+                                        new_server.unwrap_err()
+                                    ));
                                     continue;
                                 }
                                 let mut new_server = new_server.unwrap();
                                 current_server_name = args[1].to_string();
-                            
-                                self.write_handshake(&mut new_server, 340, "localhost", 8001, 2);
+
+                                // self.write_handshake(&mut new_server, 340, "localhost", 8001, 2);
+                                self.write_handshake(&mut new_server, 757, "localhost", 8001, 2);
+
                                 {
                                     let mut v: Vec<u8> = vec![];
                                     v.write_var_u32(0x0).unwrap();
@@ -99,15 +108,19 @@ impl PlayerConnection {
                                     dbg!(len, id);
                                     match id {
                                         0 => {
-                                            let disconnect_reason = new_server.read_string().unwrap();
-                                            self.send_chat_message(format!("§4Disconnected. reason: §r{}!", disconnect_reason));
-
+                                            let disconnect_reason =
+                                                new_server.read_string().unwrap();
+                                            self.send_chat_message(format!(
+                                                "§4Disconnected. reason: §r{}!",
+                                                disconnect_reason
+                                            ));
 
                                             new_server.shutdown(std::net::Shutdown::Both).unwrap();
                                             continue;
                                         }
                                         2 => {
-                                            let uuid = new_server.read_string().unwrap();
+                                            // let uuid = new_server.read_string().unwrap();
+                                            let uuid = new_server.read_i128::<BigEndian>().unwrap();
                                             let username = new_server.read_string().unwrap();
                                             self.current_server
                                                 .shutdown(std::net::Shutdown::Both)
@@ -127,7 +140,10 @@ impl PlayerConnection {
                                 // This stops it from forwarding to the server that you executed the /join command
                                 continue;
                             } else {
-                                self.send_chat_message(format!("Already connected to §a{}!", args[1]));
+                                self.send_chat_message(format!(
+                                    "Already connected to §a{}!",
+                                    args[1]
+                                ));
                                 continue;
                             }
                         }
@@ -146,16 +162,24 @@ impl PlayerConnection {
         }
     }
     fn send_chat_message<T: ToString>(&mut self, chat: T) {
-        let mut buf = vec![];
+        println!("Shouldve logged {}", chat.to_string());
+        // let mut buf = vec![];
 
-        buf.write_var_u32(0x0f).unwrap();
-        buf.write_string(format!(r#"{{"text": "{}"}}"#, chat.to_string()));
-        buf.write_i8(0).unwrap();
+        // buf.write_var_u32(0x0f).unwrap();
+        // buf.write_string(format!(r#"{{"text": "{}"}}"#, chat.to_string()));
+        // buf.write_i8(0).unwrap();
 
-        self.client.write_var_u32(buf.len() as u32).unwrap();
-        self.client.write_all(&buf).unwrap();  
+        // self.client.write_var_u32(buf.len() as u32).unwrap();
+        // self.client.write_all(&buf).unwrap();
     }
-    fn write_handshake(&self, stream: &mut TcpStream, pv: u32, address: &str, port: u16, next_state: u32) {
+    fn write_handshake(
+        &self,
+        stream: &mut TcpStream,
+        pv: u32,
+        address: &str,
+        port: u16,
+        next_state: u32,
+    ) {
         let mut v: Vec<u8> = vec![];
 
         v.write_var_u32(0x0).unwrap();
@@ -167,8 +191,6 @@ impl PlayerConnection {
         stream.write_var_u32(v.len() as u32).unwrap();
         stream.write_all(&v).unwrap();
     }
-  
-
 }
 pub fn handle_server(rx: Receiver<TcpStream>, mut server: TcpStream, mut client: TcpStream) {
     {
@@ -198,46 +220,81 @@ pub fn handle_server(rx: Receiver<TcpStream>, mut server: TcpStream, mut client:
 
                 let id = b.read_var_u32().unwrap();
                 // Printing takes too long when printing chunk data. Its useless to the human eye anyway.
-                if id == 0x23 {
+                // if id == 0x23 {
+                if id == 0x26 {
                     client.write_var_u32(len).unwrap();
                     client.write_all(&buf).unwrap();
+
                     if recently_transferred {
+                        // let x= vec![];
+
+                        // hexdump(&b.get_ref());
+                        // let dim: nbt::Map<String, String> = nbt::from_reader(b).unwrap();
+                        // dbg!(&dim);
                         let _eid = b.read_i32::<BigEndian>().unwrap();
+                        let h = b.read_i8().unwrap() != 0;
                         let gamemode = b.read_u8().unwrap();
-                        let dimension = b.read_i32::<BigEndian>().unwrap();
-                        let difficulty = b.read_u8().unwrap();
-                        let _maxplayers = b.read_u8().unwrap();
-                        let level_type = b.read_string().unwrap_or("default".to_string());
-                        let mut send_respawn = |dimension| {
-                            // let difficulty = 1;
-                            // let gamemode = 1;
-                            // let level_type = "flat";
+                        let prevgamemode = b.read_u8().unwrap();
+                        let world_count = b.read_var_u32().unwrap();
+                        let worlds = (0..world_count)
+                            .map(|_| b.read_string().unwrap())
+                            .collect::<Vec<_>>();
+                        let codec: Blob = nbt::from_reader(&mut b).unwrap();
+                        let dimension: Blob = nbt::from_reader(&mut b).unwrap();
+                        let world_name = b.read_string().unwrap();
+                        let hashed_seed = b.read_i64::<BigEndian>().unwrap();
 
-                            let mut v = vec![];
-                            v.write_var_u32(0x35).unwrap();
-                            v.write_i32::<BigEndian>(dimension).unwrap();
-                            v.write_u8(difficulty).unwrap();
-                            v.write_u8(gamemode).unwrap();
-                            v.write_string(level_type.to_string());
+                        dbg!(worlds, codec, &dimension);
+                        // let dimension = b.read_i32::<BigEndian>().unwrap();
+                        // let difficulty = b.read_u8().unwrap();
+                        // let _maxplayers = b.read_u8().unwrap();
+                        // let level_type = b.read_string().unwrap_or("default".to_string());
+                        // macro_rules! respawn {
+                        //     ($dim: expr) => {
+                            let mut respawn = |dim| {
+                                let mut v = vec![];
+                                v.write_var_u32(0x3d).unwrap();
+                                nbt::to_writer(&mut v, &dim, None).unwrap();
+                                v.write_string("minecraft:doesthismatter".to_string());
+                                v.write_i64::<BigEndian>(hashed_seed);
+                                v.write_u8(gamemode);
+                                v.write_u8(prevgamemode);
+                                // is debug
+                                v.write_u8(false as u8);
+                                // is flat
+                                v.write_u8(false as u8);
+                                // copy metadata
+                                v.write_u8(false as u8);
 
-                            client.write_var_u32(v.len() as u32).unwrap();
-                            client.write_all(&v).unwrap();
-                        };
-                        let fake_dimension = match dimension {
-                            -1 => 1,
-                            0 => -1,
-                            1 => 0,
-                            _ => panic!(),
-                        };
-                        send_respawn(fake_dimension);
-                        send_respawn(dimension);
+                                client.write_var_u32(v.len() as u32).unwrap();
+                                client.write_all(&v).unwrap();
+                            };
+                               
+                            // };
+                        // }
+                        respawn(dimension);
+                        // respawn!(dimension);
+
+                        // let fake_dimension = match dimension {
+                        //     -1 => 1,
+                        //     0 => -1,
+                        //     1 => 0,
+                        //     _ => panic!(),
+                        // };
+                        // send_respawn(fake_dimension);
+                        // send_respawn(dimension);
                         recently_transferred = false;
                     }
                 }
 
                 match id {
                     // Join game
-                    0x23 => {}
+                    0x26 => {}
+                    0x3d => {
+                        hexdump(&buf);
+                        client.write_var_u32(len).unwrap();
+                        client.write_all(&buf).unwrap();
+                    }
                     _ => {
                         client.write_var_u32(len).unwrap();
                         client.write_all(&buf).unwrap();
